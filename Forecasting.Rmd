@@ -1,0 +1,192 @@
+---
+title: "Forecasting"
+author: "Ishaan Singh"
+date: "07/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading required libraries, echo = FALSE, warning = FALSE}
+
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+
+```
+
+# PART ONE
+
+## Fitting Models
+
+Using the data from 6 June 2021 to 22 August 2021, we shall fit the data to four trend models (linear, quadratic, cubic and exponential). To test which model best fits the NSW data, we shall compare the AIC values from each 
+
+```{r fitting trends}
+
+data = read.csv("covid.csv")
+in_sample = data[data$date <= as.Date("2021-08-22"),]
+out_sample = data[data$date > as.Date("2021-08-22"),]
+out_sample = c(out_sample$nsw)
+
+n = 78
+trend = c(1:n)
+in_sample$trend = trend
+AIC_vec = matrix(ncol = 4, nrow = 1)
+
+for(i in 1:4){
+    if(i < 4){
+        reg = lm(nsw ~ poly(trend, degree = i, raw = T), data = in_sample)
+        AIC_vec[i] = log(crossprod(reg$residuals)) + 2*length(reg$coefficients)/n
+    }else{
+        reg = lm(log(nsw) ~ trend, data = in_sample)
+        yhat = reg$fitted.values
+        sig = sd(reg$residuals)
+        ystar = exp(yhat + sig^2/2)
+        res = in_sample$nsw - ystar
+        AIC_vec[i] = log(crossprod(res)) + 2*length(reg$coefficients)/n
+    }
+}
+
+AIC_vec
+
+```
+
+From the AIC values obtained for each model, we see that the cubic trend model is the one that best fits the data. 
+
+## Forecasts
+
+We shall now use this cubic model to produce forecasts.
+
+```{r cubic trend forecasts}
+
+forecasts = rep(NA,7)
+
+for(i in 1:7){
+    regression <- lm(nsw ~ poly(trend,degree = 3,raw = T),data = in_sample)
+    forecasts[i] <- regression$coef[1] + regression$coef[2]*(n + i) + regression$coef[3]*((n + i)^2) + regression$coef[4]*((n + i)^3)
+}
+
+e_t = out_sample - forecasts
+
+rmsfe = sqrt(mean(e_t^2,na.rm = T))
+
+forecasts.table = data.frame(out_sample, forecasts)
+
+plot(out_sample,type="l",col="red", ylab = "NSW Cases")
+lines(forecasts,col="green")
+
+```
+
+
+# PART TWO
+
+## Fitting Models
+
+We start by fitting an VAR(1) model with a cubic trend component to the cases and tests data.
+
+```{r VAR(1) model fitting}
+
+data = read.csv("covid2.csv")
+data$cases_lag = shift(data$cases)
+data$tests_lag = shift(data$tests)
+data$trend = c(1:99)
+train = data[data$date <= as.Date("2021-08-22"),]
+
+VAR_cases = lm(cases ~ cases_lag + tests_lag + poly(trend, degree = 3, raw = T), data = train)
+summary(VAR_cases)
+VAR_tests = lm(tests ~ cases_lag + tests_lag + poly(trend, degree = 3, raw = T), data = train)
+summary(VAR_tests)
+
+```
+## Forecasts
+
+Now that we have fitted the VAR(1) models to the data, we now produce forecasts for the remaining dates (the ones not used in the model fitting). We also produce forecasts for an AR(1) model with a cubic trend to compare the RMSE values from the forecasts produced for each model.
+
+
+```{r}
+
+data = data[2:99,]
+window = data[data$date <= as.Date("2021-08-22"),]
+R = 77
+t = nrow(data)
+P = t - R
+
+data$cases_AR = NA
+data$tests_AR = NA
+data$cases_VAR = NA
+data$tests_VAR = NA
+
+for (i in 1:P){
+    cases_AR = lm(cases ~ cases_lag + poly(trend, degree = 3, raw = T), data = data[i:(R-1+i),])
+    tests_AR = lm(tests ~ tests_lag + poly(trend, degree = 3, raw = T), data = data[i:(R-1+i),])
+    
+    VAR_cases = lm(cases ~ cases_lag + tests_lag + poly(trend, degree = 3, raw = T), 
+                   data = data[i:(R-1+i),])
+    VAR_tests = lm(tests ~ cases_lag + tests_lag + poly(trend, degree = 3, raw = T), 
+                   data = data[i:(R-1+i),])
+    
+    data$cases_AR[R+i] = cases_AR$coefficients[1] + cases_AR$coefficients[2] * data$cases[R-1+i] 
+    + cases_AR$coefficients[3] * (t+i) + cases_AR$coefficients[4] * (t+i)^2 
+    + cases_AR$coefficients[5] * (t+i)^3
+    data$tests_AR[R+i] = tests_AR$coefficients[1] + tests_AR$coefficients[2] * data$tests[R-1+i] 
+    + tests_AR$coefficients[3] * (t+i) + tests_AR$coefficients[4] * (t+i)^2 
+    + tests_AR$coefficients[5] * (t+i)^3
+    
+    data$cases_VAR[R+i] = VAR_cases$coefficients[1] + VAR_cases$coefficients[2] * data$cases[R-1+i]
+    + VAR_cases$coefficients[3] * data$tests[R-1+i]
+    + VAR_cases$coefficients[4] * (t+i) + VAR_cases$coefficients[5] * (t+i)^2 
+    + VAR_cases$coefficients[6] * (t+i)^3
+    data$tests_VAR[R+i] = VAR_tests$coefficients[1] + VAR_tests$coefficients[2] * data$cases[R-1+i]
+    + VAR_tests$coefficients[3] * data$tests[R-1+i]
+    + VAR_tests$coefficients[4] * (t+i) + VAR_tests$coefficients[5] * (t+i)^2 
+    + VAR_tests$coefficients[6] * (t+i)^3
+}
+
+cases_AR_e = data$cases[78:98] - data$cases_AR[78:98]
+cases_VAR_e = data$cases[78:98] - data$cases_VAR[78:98]
+tests_AR_e = data$tests[78:98] - data$tests_AR[78:98]
+tests_VAR_e = data$tests[78:98] - data$tests_VAR[78:98]
+
+rmsfe_cases_AR = sqrt(mean(cases_AR_e^2,na.rm = T))
+rmsfe_tests_AR = sqrt(mean(tests_AR_e^2,na.rm = T))
+rmsfe_cases_VAR = sqrt(mean(cases_VAR_e^2,na.rm = T))
+rmsfe_tests_VAR = sqrt(mean(tests_VAR_e^2,na.rm = T))
+
+paste("RMSE of the AR(1) model for cases:",round(rmsfe_cases_AR,2))
+paste("RMSE of the VAR(1) model for cases:",round(rmsfe_cases_VAR,2))
+paste("RMSE of the AR(1) model for tests:",round(rmsfe_tests_AR,2))
+paste("RMSE of the VAR(1) model for tests:",round(rmsfe_tests_VAR,2))
+
+
+```
+
+We can use the results above to test the Granger causality of cases on tests and vice versa. Since, the AR model is a restricted form of the VAR model, we can compare the RMSE values for the cases and tests models. When modeling cases, since the RMSE for the VAR model is lower than that of the AR model, it implies from the evidence at hand that tests Granger cause cases, while the cases do not Granger cause tests. The interpretation is as follows:
+- The number of COVID-19 tests that are conducted has a causal effect on the number of COVID-19 cases
+- The number of COVID-19 cases does not have a casual effect on the number of tests conducted
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
